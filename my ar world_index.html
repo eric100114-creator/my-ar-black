@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>BLACK SUGAR - AR 智慧輔助系統</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background-color: #000; font-family: -apple-system, sans-serif; }
+        #container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
+        
+        #overlay {
+            position: fixed; inset: 0; 
+            background: radial-gradient(circle at center, #1a1a2e 0%, #000 100%);
+            color: white; display: flex; flex-direction: column;
+            justify-content: center; align-items: center; z-index: 10000;
+        }
+
+        .start-btn {
+            background: linear-gradient(135deg, #ef4444 0%, #991b1b 100%);
+            color: white; padding: 22px 64px; border-radius: 50px;
+            font-size: 1.6rem; font-weight: 900; border: none; cursor: pointer;
+            box-shadow: 0 0 40px rgba(239, 68, 68, 0.5);
+            transition: all 0.2s;
+        }
+
+        .reticle {
+            position: fixed; top: 50%; width: 10px; height: 10px;
+            background: #0ff; border-radius: 50%;
+            transform: translate(-50%, -50%); z-index: 100;
+            pointer-events: none; border: 2px solid #fff;
+            box-shadow: 0 0 15px #0ff;
+        }
+        #reticle-l { left: 25%; }
+        #reticle-r { left: 75%; }
+
+        #status-display {
+            position: fixed; top: 10%; left: 50%; transform: translateX(-50%);
+            color: #00ffff; font-family: monospace; font-size: 14px; z-index: 200;
+            text-shadow: 0 0 10px #0ff; letter-spacing: 2px;
+            background: rgba(0,0,0,0.5); padding: 4px 12px; border-radius: 20px;
+        }
+
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+
+    <div id="container"></div>
+    <div id="status-display" class="hidden">SYSTEM: ONLINE</div>
+    <div id="reticle-l" class="reticle hidden"></div>
+    <div id="reticle-r" class="reticle hidden"></div>
+
+    <div id="overlay">
+        <h1 class="text-5xl font-black mb-4 italic tracking-tighter">BLACK SUGAR</h1>
+        <div class="h-1 w-20 bg-red-600 mb-8"></div>
+        <button id="start-btn" class="start-btn">INITIALIZE AR</button>
+        <p class="mt-8 text-gray-500 text-xs tracking-widest uppercase">Smart Vision Integration v2.1</p>
+    </div>
+
+    <script type="module">
+        // 核心設定
+        const GEMINI_API_KEY = "AIzaSyD7IoECZeUdWvuE_Vxycx26C90hi4J0fgs";
+        
+        let scene, renderer, cameras = [], video, videoTexture, group;
+        let interactiveBtn, infoPanel;
+        let lookTimer = 0;
+        let isProcessing = false;
+
+        const startBtn = document.getElementById('start-btn');
+        const overlay = document.getElementById('overlay');
+        const statusDisplay = document.getElementById('status-display');
+
+        async function startSystem() {
+            try {
+                // 優化相機參數，確保在 AR 眼鏡中清晰
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { 
+                        facingMode: 'environment', 
+                        width: { ideal: 1920 }, 
+                        height: { ideal: 1080 },
+                        focusMode: 'continuous'
+                    }
+                });
+                
+                video = document.createElement('video');
+                video.srcObject = stream;
+                video.setAttribute('playsinline', '');
+                video.muted = true;
+                await video.play();
+
+                initThreeJS();
+
+                overlay.remove();
+                statusDisplay.classList.remove('hidden');
+                document.querySelectorAll('.reticle').forEach(r => r.classList.remove('hidden'));
+
+                // 嘗試全螢幕
+                if (document.documentElement.requestFullscreen) {
+                    document.documentElement.requestFullscreen().catch(() => {});
+                }
+            } catch (err) {
+                alert("相機初始化失敗，請確保使用 HTTPS 並授權權限。\n錯誤資訊: " + err.message);
+            }
+        }
+
+        function updatePanelTexture(title, content = "") {
+            const canvas = document.createElement('canvas');
+            canvas.width = 1024; canvas.height = 512;
+            const ctx = canvas.getContext('2d');
+
+            // 玻璃擬態背景
+            ctx.fillStyle = 'rgba(0, 30, 60, 0.9)';
+            ctx.fillRect(0, 0, 1024, 512);
+            
+            // 霓虹框
+            ctx.strokeStyle = '#0ff'; ctx.lineWidth = 15;
+            ctx.strokeRect(10, 10, 1004, 492);
+
+            // 標題
+            ctx.fillStyle = '#0ff'; ctx.font = 'bold 70px sans-serif';
+            ctx.fillText(title, 60, 120);
+
+            // 內容文字
+            ctx.fillStyle = '#fff'; ctx.font = '40px sans-serif';
+            
+            const wrapText = (text, x, y, maxWidth, lineHeight) => {
+                const chars = text.split('');
+                let line = '';
+                for(let n = 0; n < chars.length; n++) {
+                    let testLine = line + chars[n];
+                    if (ctx.measureText(testLine).width > maxWidth) {
+                        ctx.fillText(line, x, y);
+                        line = chars[n];
+                        y += lineHeight;
+                    } else { line = testLine; }
+                }
+                ctx.fillText(line, x, y);
+            };
+
+            wrapText(content, 60, 220, 900, 60);
+            
+            const tex = new THREE.CanvasTexture(canvas);
+            if (infoPanel) {
+                infoPanel.material.map = tex;
+                infoPanel.material.needsUpdate = true;
+                infoPanel.material.opacity = 1;
+            }
+            return tex;
+        }
+
+        function initThreeJS() {
+            const w = window.innerWidth;
+            const h = window.innerHeight;
+            
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(w, h);
+            renderer.autoClear = false;
+            document.getElementById('container').appendChild(renderer.domElement);
+
+            scene = new THREE.Scene();
+            videoTexture = new THREE.VideoTexture(video);
+            
+            // 背景影像
+            const bgMat = new THREE.MeshBasicMaterial({ map: videoTexture });
+            const bg = new THREE.Mesh(new THREE.PlaneGeometry(16, 9), bgMat);
+            bg.position.z = -10; bg.scale.set(3.5, 3.5, 1);
+            scene.add(bg);
+
+            group = new THREE.Group();
+            scene.add(group);
+
+            // 互動按鈕
+            interactiveBtn = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.4, 0.1), new THREE.MeshBasicMaterial({ color: 0xff0000 }));
+            interactiveBtn.position.set(0, -1, -4);
+            group.add(interactiveBtn);
+
+            // HUD 面板
+            infoPanel = new THREE.Mesh(new THREE.PlaneGeometry(3.5, 1.75), new THREE.MeshBasicMaterial({ transparent: true, opacity: 0 }));
+            infoPanel.position.set(0, 1, -4);
+            updatePanelTexture("系統就緒", "請將準星對準下方紅色方塊啟動辨識...");
+            group.add(infoPanel);
+
+            // 雙眼相機
+            const aspect = (w / 2) / h;
+            cameras = [
+                new THREE.PerspectiveCamera(65, aspect, 0.1, 100),
+                new THREE.PerspectiveCamera(65, aspect, 0.1, 100)
+            ];
+            cameras[0].position.x = -0.035; // 瞳距校正
+            cameras[1].position.x = 0.035;
+
+            // 陀螺儀綁定
+            window.addEventListener('deviceorientation', (e) => {
+                if (e.alpha !== null) {
+                    group.rotation.y = THREE.MathUtils.degToRad(e.alpha);
+                    group.rotation.x = THREE.MathUtils.degToRad(e.beta - 90);
+                }
+            }, true);
+
+            renderLoop();
+        }
+
+        async function triggerAI() {
+            if (isProcessing) return;
+            isProcessing = true;
+            statusDisplay.textContent = "AI ANALYSING...";
+            updatePanelTexture("分析中", "正在利用 Gemini 2.0 處理視覺數據...");
+
+            const canvas = document.createElement('canvas');
+            canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+            canvas.getContext('2d').drawImage(video, 0, 0);
+            const base64 = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
+
+            const prompt = "你是智慧眼鏡助手。請分析圖片並僅回傳 JSON 格式: {\"summary\": \"50字內摘要\"}";
+
+            try {
+                const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType: "image/jpeg", data: base64 } }] }]
+                    })
+                });
+
+                const data = await response.json();
+                let rawText = data.candidates[0].content.parts[0].text;
+                
+                // 強力 JSON 解析容錯
+                try {
+                    const cleanJson = rawText.replace(/```json|```/g, "").trim();
+                    const parsed = JSON.parse(cleanJson);
+                    updatePanelTexture("分析結果", parsed.summary);
+                } catch (e) {
+                    updatePanelTexture("分析結果", rawText.substring(0, 120));
+                }
+                
+                statusDisplay.textContent = "SYSTEM: COMPLETED";
+            } catch (err) {
+                updatePanelTexture("ERROR", "連線超時，請檢查網路狀態。");
+                statusDisplay.textContent = "SYSTEM: ERROR";
+            } finally {
+                isProcessing = false;
+                lookTimer = 0;
+            }
+        }
+
+        function renderLoop() {
+            requestAnimationFrame(renderLoop);
+            
+            // 凝視檢測
+            const ray = new THREE.Raycaster();
+            ray.setFromCamera(new THREE.Vector2(0, 0), cameras[0]);
+            const hits = ray.intersectObject(interactiveBtn);
+
+            if (hits.length > 0 && !isProcessing) {
+                lookTimer++;
+                interactiveBtn.scale.set(1.1, 1.1, 1.1);
+                if (lookTimer > 45) triggerAI(); 
+            } else {
+                if (!isProcessing) {
+                    lookTimer = 0;
+                    interactiveBtn.scale.set(1, 1, 1);
+                }
+            }
+
+            const w = window.innerWidth; const h = window.innerHeight;
+            renderer.clear();
+            renderer.setViewport(0, 0, w / 2, h); renderer.render(scene, cameras[0]);
+            renderer.setViewport(w / 2, 0, w / 2, h); renderer.render(scene, cameras[1]);
+        }
+
+        startBtn.addEventListener('click', startSystem);
+    </script>
+</body>
+</html>
